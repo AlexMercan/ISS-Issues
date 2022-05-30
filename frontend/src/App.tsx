@@ -1,32 +1,44 @@
 import React from 'react';
-import logo from './logo.svg';
 import './App.css';
 
-import { RouteObject, useRoutes } from 'react-router'
+import { Navigate, RouteObject, useRoutes } from 'react-router'
 
-import { Link, Route } from 'react-router-dom';
-import SignIn from './components/SignIn';
-import SignUp from './components/SignUp';
-import { Projects } from './components/Projects'
+import Login from './components/Login';
+import Register from './components/Register';
+import { Issues } from './components/Issues'
+import { IssuePage } from "./components/IssuePage";
+import { UserProvider } from './components/UserProvider';
+import { AddIssue } from './components/AddIssue';
 
 function App() {
     const loginRoute: RouteObject = {
         path: "/login",
-        element: <SignIn />
+        element: <Login />
     }
     const registerRoute: RouteObject = {
         path: "/register",
-        element: <SignUp />
+        element: <Register />
     }
     const mainRoute: RouteObject = {
-        path: "/",
-        element: <Projects />
+        path: "/issues",
+        element: <Issues />
     }
-    const routing = useRoutes([loginRoute, registerRoute, mainRoute])
+    const issueRoute: RouteObject = {
+        path: "/issues/:issueId",
+        element: <IssuePage />
+    }
+    const addIssueRoute: RouteObject = {
+        path: "/issues/add",
+        element: <AddIssue />
+    }
+    const redirectToMain: RouteObject = {
+        path: "*",
+        element: <Navigate replace to="/issues" />
+    }
+    let routing = useRoutes([loginRoute, registerRoute, mainRoute, issueRoute, redirectToMain, addIssueRoute])
     return (
-        <>
-            {routing}
-        </>
+        <UserProvider children={routing}></UserProvider>
     );
 }
+
 export default App;

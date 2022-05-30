@@ -2,55 +2,33 @@ package main
 
 import (
 	"context"
-	"encoding/json"
-	"fmt"
+	"database/sql"
 	"log"
 	"net/http"
 	"os"
 
 	"server/controller"
+	"server/ent"
+	"server/middleware"
 	"server/repository"
 
+	"server/ent/migrate"
+
+	"entgo.io/ent/dialect"
+	entsql "entgo.io/ent/dialect/sql"
 	"github.com/go-chi/chi/v5"
-	"github.com/go-chi/chi/v5/middleware"
-	"github.com/go-chi/cors"
-	"github.com/golang-jwt/jwt"
+	chiMiddleware "github.com/go-chi/chi/v5/middleware"
+	_ "github.com/jackc/pgx/v4/stdlib"
 	"github.com/joho/godotenv"
-	"gorm.io/driver/postgres"
-	"gorm.io/gorm"
 )
 
-func authMiddleware(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		tokenCookie, err := r.Cookie("token")
-		log.Printf("Cookies: %v", r.Cookies())
-		if err != nil {
-			log.Printf("Error: %s", err)
-			noCookieToken := controller.ErrorResponse{Message: err.Error()}
-			w.WriteHeader(http.StatusUnauthorized)
-			w.Header().Add("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(noCookieToken)
-			return
-		}
-		token, err := jwt.Parse(tokenCookie.Value, func(token *jwt.Token) (interface{}, error) {
-			if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
-				e := fmt.Errorf("Unexpected signing method: %s", token.Header["alg"])
-				log.Printf("Unexpected signing method: %x", token.Header["alg"])
-				return nil, e
-			}
-			return []byte("verysecretkey"), nil
-		})
-		if claims, ok := token.Claims.(jwt.MapClaims); ok && token.Valid {
-			ctx := context.WithValue(r.Context(), "props", claims)
-			next.ServeHTTP(w, r.WithContext(ctx))
-		} else {
-			log.Println(err)
-			unauthorizedError := controller.ErrorResponse{Message: "Unauthorized"}
-			w.WriteHeader(http.StatusUnauthorized)
-			w.Header().Add("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(unauthorizedError)
-		}
-	})
+func Open(connString string) *ent.Client {
+	client, err := sql.Open("pgx", connString)
+	if err != nil {
+		log.Fatal(err)
+	}
+	driver := entsql.OpenDB(dialect.Postgres, client)
+	return ent.NewClient(ent.Driver(driver))
 }
 
 func main() {
@@ -59,56 +37,59 @@ func main() {
 		log.Fatal("Error loading .env file")
 	}
 	connString := os.Getenv("POSTGRES_URL")
-	DB, err := gorm.Open(postgres.Open(connString), &gorm.Config{})
+	client := Open(connString)
+
+	defer client.Close()
+
+	ctx := context.Background()
+	// Run migration.
+	err = client.Schema.Create(
+		ctx,
+		migrate.WithDropIndex(true),
+		migrate.WithDropColumn(true),
+	)
 	if err != nil {
-		log.Fatalf("Database error %s", err.Error())
+		log.Fatalf("failed creating schema resources: %v", err)
 	}
 
-	userAuthRepo := repository.CreateUserAuthRepository(DB)
+	userAuthRepo := repository.CreateUserAuthRepository(client)
 	userAuthController := controller.CreateUserAuthController(userAuthRepo, []byte("verysecretkey"))
-	userRepository := repository.CreateUserRepository(DB)
+	userRepository := repository.CreateUserRepository(client)
 	userController := controller.CreateUserController(userRepository)
+	issueRepository := repository.CreateIssueRepository(client)
+	issueController := controller.CreateIssueController(issueRepository)
+	issueTagRepository := repository.CreateIssueTagRepository(client)
+	issueTagController := controller.CreateIssueTagController(issueTagRepository)
+
 	r := chi.NewRouter()
-	r.Use(middleware.RequestID)
-	r.Use(middleware.RealIP)
-	r.Use(middleware.Logger)
-	r.Use(middleware.Recoverer)
-	r.Use(cors.Handler(cors.Options{
-		AllowedOrigins:   []string{"http://localhost:3333", "https://localhost:3333"},
-		AllowedMethods:   []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
-		AllowedHeaders:   []string{"Accept", "Authorization", "Content-Type", "X-CSRF-Token"},
-		ExposedHeaders:   []string{"Link"},
-		AllowCredentials: true,
-		MaxAge:           300,
-	}))
+	r.Use(chiMiddleware.RequestID)
+	r.Use(chiMiddleware.RealIP)
+	r.Use(chiMiddleware.Logger)
+	r.Use(chiMiddleware.Recoverer)
 
 	r.Route("/auth", func(r chi.Router) {
-		r.Use(middleware.Logger)
-		r.Use(cors.Handler(cors.Options{
-			AllowedOrigins:   []string{"http://localhost:3333", "https://localhost:3333"},
-			AllowedMethods:   []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
-			AllowedHeaders:   []string{"Accept", "Authorization", "Content-Type", "X-CSRF-Token"},
-			ExposedHeaders:   []string{"Link"},
-			AllowCredentials: true,
-			MaxAge:           300,
-		}))
+		r.Use(chiMiddleware.RequestID)
+		r.Use(chiMiddleware.RealIP)
+		r.Use(chiMiddleware.Logger)
+		r.Use(chiMiddleware.Recoverer)
 		r.Post("/login", userAuthController.Login)
 		r.Post("/register", userAuthController.Register)
 	})
 	r.Route("/api", func(r chi.Router) {
-		r.Use(cors.Handler(cors.Options{
-			AllowedOrigins:   []string{"http://localhost:3333", "https://localhost:3333"},
-			AllowedMethods:   []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
-			AllowedHeaders:   []string{"Accept", "Authorization", "Content-Type", "X-CSRF-Token"},
-			ExposedHeaders:   []string{"Link"},
-			AllowCredentials: true,
-			MaxAge:           300,
-		}))
-		r.Use(middleware.Logger)
-		r.Use(authMiddleware)
-		r.Get("/projects", userController.GetProjects)
+		r.Use(chiMiddleware.RequestID)
+		r.Use(chiMiddleware.RealIP)
+		r.Use(chiMiddleware.Logger)
+		r.Use(chiMiddleware.Recoverer)
+		r.Use(middleware.AuthMiddleware)
+		r.Get("/issues", issueController.GetIssues)
+        r.Get("/user", userController.GetUser)
+		r.Post("/issues/{issueId}", issueController.UpdateIssue)
+		r.Get("/issues/{issueId}", issueController.GetIssue)
+		r.Post("/issues", issueController.SaveIssue)
+		r.Get("/issuetags", issueTagController.GetAll)
 	})
-	err = http.ListenAndServe("localhost:", r)
+
+	err = http.ListenAndServe(":5000", r)
 	if err != nil {
 		panic(err)
 	}

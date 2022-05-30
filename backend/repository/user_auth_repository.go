@@ -1,41 +1,55 @@
 package repository
 
 import (
-	"server/model"
+	"context"
+	"fmt"
+	"log"
+	"server/ent/user"
 
-	"gorm.io/gorm"
+	"server/ent"
 )
 
-type IUserAuthRepository interface {
-	FindOneById(ID uint) *model.User
-	FindOneByUsername(Username string) *model.User
-	Save(user model.User) (uint, error)
-}
-
 type UserAuthRepository struct {
-	DB *gorm.DB
+	client *ent.Client
 }
 
-func CreateUserAuthRepository(DB *gorm.DB) *UserAuthRepository {
-	return &UserAuthRepository{DB}
+func CreateUserAuthRepository(client *ent.Client) *UserAuthRepository {
+	return &UserAuthRepository{client}
 }
 
-func (repo *UserAuthRepository) FindOneById(ID uint) *model.User {
-	var userAuthData model.User
-	repo.DB.Select("id", "username", "password").Find(&userAuthData, ID)
-	return &userAuthData
-}
-
-func (repo *UserAuthRepository) FindOneByUsername(Username string) *model.User {
-	var userAuthData model.User
-	repo.DB.Select("id", "username", "password").Find(&userAuthData, "username = ?", Username)
-	return &userAuthData
-}
-
-func (repo *UserAuthRepository) Save(user model.User) (uint, error) {
-	result := repo.DB.Create(&user)
-	if result.Error != nil {
-		return 0, result.Error
+func (repo *UserAuthRepository) FindOneById(ctx context.Context, ID uint) (*ent.User, error) {
+	user, err := repo.client.User.
+		Query().
+		Where(user.ID(int(ID))).
+		Only(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed querying user: %w", err)
 	}
-	return user.ID, nil
+	log.Println("user returned: ", user)
+	return user, nil
+}
+
+func (repo *UserAuthRepository) FindOneByUsername(ctx context.Context, Username string) (*ent.User, error) {
+	user, err := repo.client.User.
+		Query().
+		Where(user.Username(Username)).
+		Only(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed querying user: %w", err)
+	}
+	log.Println("user returned: ", user)
+	return user, nil
+}
+
+func (repo *UserAuthRepository) Save(ctx context.Context, Username string, Password string, Role user.Role) (*ent.User, error) {
+	user, err := repo.client.User.
+		Create().
+		SetPassword(Password).
+		SetUsername(Username).
+		SetRole(Role).
+		Save(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed saving user: %w", err)
+	}
+	return user, nil
 }

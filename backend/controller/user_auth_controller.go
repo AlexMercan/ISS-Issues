@@ -4,38 +4,50 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
-	"server/model"
+	"server/ent"
+	"server/ent/user"
 	"server/repository"
 	"time"
+	"unicode/utf8"
 
-	"github.com/golang-jwt/jwt"
+	"github.com/golang-jwt/jwt/v4"
 	"golang.org/x/crypto/bcrypt"
 )
 
 type Claims struct {
-	Username string `json:"username"`
-	jwt.StandardClaims
+	Username string    `json:"username"`
+	Role     user.Role `json:"role"`
+	Id       int       `json:"id"`
+	jwt.RegisteredClaims
 }
 
 type UserAuthController struct {
-	repo   repository.IUserAuthRepository
+	repo   *repository.UserAuthRepository
 	secret []byte
 }
 
-func CreateUserAuthController(repo repository.IUserAuthRepository, secret []byte) *UserAuthController {
+func CreateUserAuthController(repo *repository.UserAuthRepository, secret []byte) *UserAuthController {
 	return &UserAuthController{repo, secret}
 }
 
 func (authController *UserAuthController) Login(w http.ResponseWriter, r *http.Request) {
-	var credentials model.Credentials
-	err := json.NewDecoder(r.Body).Decode(&credentials)
+	var userCredentials ent.User
+	err := json.NewDecoder(r.Body).Decode(&userCredentials)
 	if err != nil {
 		log.Print(err)
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
-	user := authController.repo.FindOneByUsername(credentials.Username)
-	err = bcrypt.CompareHashAndPassword([]byte(user.Credentials.Password), []byte(credentials.Password))
+	user, err := authController.repo.FindOneByUsername(r.Context(), userCredentials.Username)
+	if err != nil {
+		log.Print(err)
+		repoError := ErrorResponse{Type: "validation", Message: err.Error()}
+		w.WriteHeader(http.StatusBadRequest)
+		w.Header().Add("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(repoError)
+		return
+	}
+	err = bcrypt.CompareHashAndPassword([]byte(user.Password), []byte(userCredentials.Password))
 	if err != nil {
 		log.Print(err)
 		w.WriteHeader(http.StatusUnauthorized)
@@ -43,9 +55,11 @@ func (authController *UserAuthController) Login(w http.ResponseWriter, r *http.R
 	}
 	expirationTime := time.Now().Add(5 * time.Hour)
 	claims := &Claims{
-		Username: credentials.Username,
-		StandardClaims: jwt.StandardClaims{
-			ExpiresAt: expirationTime.Unix(),
+		Username: userCredentials.Username,
+		Role:     userCredentials.Role,
+		Id:       user.ID,
+		RegisteredClaims: jwt.RegisteredClaims{
+			ExpiresAt: &jwt.NumericDate{Time: expirationTime},
 		},
 	}
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
@@ -56,34 +70,47 @@ func (authController *UserAuthController) Login(w http.ResponseWriter, r *http.R
 		return
 	}
 	http.SetCookie(w, &http.Cookie{
-		Name:    "token",
-		Value:   tokenStr,
-		Expires: expirationTime,
+		Name:     "token",
+		Value:    tokenStr,
+		Expires:  expirationTime,
+		HttpOnly: true,
+		SameSite: http.SameSiteStrictMode,
+		Path:     "/",
 	})
-	w.WriteHeader(http.StatusOK)
+	user.Password = ""
+	_ = json.NewEncoder(w).Encode(user)
 }
 
 func (authController *UserAuthController) Register(w http.ResponseWriter, r *http.Request) {
-	var credentials model.Credentials
+	var user ent.User
 
-	err := json.NewDecoder(r.Body).Decode(&credentials)
+	err := json.NewDecoder(r.Body).Decode(&user)
 	if err != nil {
 		log.Print(err)
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
-	hashedPass, err := bcrypt.GenerateFromPassword([]byte(credentials.Password), bcrypt.DefaultCost)
+	if utf8.RuneCountInString(user.Password) < 8 {
+		log.Print(err)
+		repoError := ErrorResponse{Type: "validation", Message: "Password is too short"}
+		w.WriteHeader(http.StatusBadRequest)
+		w.Header().Add("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(repoError)
+		return
+	}
+
+	hashedPass, err := bcrypt.GenerateFromPassword([]byte(user.Password), bcrypt.DefaultCost)
 	if err != nil {
 		log.Print(err)
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
-	credentials.Password = string(hashedPass)
-	_, err = authController.repo.Save(model.User{ID: 0, Credentials: credentials})
+	hashedPassStr := string(hashedPass)
+	_, err = authController.repo.Save(r.Context(), user.Username, hashedPassStr, user.Role)
 	if err != nil {
 		log.Print(err)
-		repoError := ErrorResponse{Message: "Username already exists"}
-		w.WriteHeader(http.StatusUnauthorized)
+		repoError := ErrorResponse{Type: "validation", Message: err.Error()}
+		w.WriteHeader(http.StatusBadRequest)
 		w.Header().Add("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(repoError)
 		return
